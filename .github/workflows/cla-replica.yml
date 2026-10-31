@@ -1,0 +1,46 @@
+name: CLA check replica (Shopify/shopify-cla-action identity logic)
+on:
+  pull_request_target:
+    types: [opened, synchronize]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  cla:
+    runs-on: ubuntu-latest
+    if: |
+      (github.event.issue.pull_request
+        && !github.event.issue.pull_request.merged_at
+        && contains(github.event.comment.body, 'signed')
+      )
+      || (github.event.pull_request && !github.event.pull_request.merged)
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Replicate cla-action decision logic
+        run: |
+          set -u
+          if [ "${{ github.event_name }}" != "pull_request_target" ]; then
+            echo "issue_comment path: the real action re-runs the last pull_request_target run; nothing to evaluate here."
+            exit 0
+          fi
+          PR="${{ github.event.pull_request.number }}"
+          # Stands in for cla.shopify.com/api/contributor-check "signedUsernames"
+          SIGNEES='["RaphaelFakhri"]'
+          authors=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/commits" --paginate \
+            --jq '[.[] | (.author.login // empty)] | unique | sort')
+          echo "PR author (the real account that opened the PR): ${{ github.event.pull_request.user.login }}"
+          echo "Commit authors resolved by the GitHub API: $authors"
+          n_all=$(echo "$authors" | jq 'length')
+          n_unsigned=$(jq -n --argjson a "$authors" --argjson s "$SIGNEES" '$a - $s | length')
+          if [ "$n_all" -eq 0 ] || [ "$n_unsigned" -ne 0 ]; then
+            echo "RESULT: CLA check FAILED - unsigned commit author(s) present"
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/labels" -f "labels[]=cla-needed" >/dev/null
+            exit 1
+          fi
+          echo "RESULT: All authors have signed a CLA. Passing check"
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR/labels/cla-needed" >/dev/null 2>&1 || true
